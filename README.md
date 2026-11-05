@@ -87,6 +87,7 @@ hdc shell "hilog -T CaptureProbe -x"
 
 - 模拟器无法启动系统「屏幕录制」（控制中心开关无响应，直接拉起 `com.huawei.hmos.screenrecorder` 的 ability 报权限错误）。为了拿到持续捕获的事件流，PoC 增加了「Web 屏幕共享」诊断页：H5 调 `getDisplayMedia()`，由应用授权，走的是系统同一套屏幕捕获服务（系统弹窗文案就是 "record or cast everything on your screen"）。真机上已用系统「录屏」磁贴直接验证到 `true/isCaptured=true → false`（脉冲 17.6s，见报告第 10.3 节）。
 - **后台检测受系统冻结限制**：真机退后台约 1s 后进程进入 `freezer:/Frozen`，之后既没有 `window.on('screenshot')`，也没有 `captureStatusChange`，恢复前台也不补发。普通应用无法在后台持续监听截屏。
+- **录屏 × 后台同样不可靠**：前台开始录屏后退出后台、再在后台停止，`capture=false` 会丢，判定卡永久停在 RECORDING/CAST；若在后台开始录屏，整段会话都收不到 `true`，只剩一个孤立的 `false`。`isCaptured()` 在恢复后仍可读，但当前 PoC 没做恢复对账（报告第 10.7 节）。
 - `setWindowPrivacyMode` 需要 `ohos.permission.PRIVACY_WINDOW`（系统/ACL 权限），普通应用不可用，因此没有做进 PoC。
 - 事件顺序与时延随设备、系统版本、触发路径（手势/控制中心/`uitest screenCap`）变化，报告中的数值只代表实测的两台设备。
 - 工程当前已在本机 `build-profile.json5` 写入调试签名（由 `devecocli signature generate` 生成），因此可以直接 `devecocli run --device <serial>`。该配置含绝对路径与账号信息，**不随仓库提交**；新克隆的仓库需要重新生成。

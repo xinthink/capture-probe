@@ -20,6 +20,7 @@
 | `screenshotAppEvent` 好用吗？ | 只覆盖系统截屏流程：模拟器延迟约 1.9s，真机 289–443ms；`uitest screenCap` / `snapshot_display` 不触发。适合「截屏已保存」类统计，不适合实时检测。 |
 | 录屏的事件流是什么？ | `captureStatusChange(true)`（`isCaptured=true`）→ 期间无事件 → `captureStatusChange(false)`（`isCaptured=false`），脉冲=录制时长；录屏中截屏会多一次 `true` + `screenshot`，停止时可能重复 `false`。见第 6 节与第 10.3 节。 |
 | 录屏/投屏验证了吗？ | 已验证。模拟器用 WebRTC 屏幕共享拿到事件流；**真机用系统「录屏」磁贴复现**：启动 `true`+`isCaptured=true`、停止 `false`、脉冲 17.6s（第 10.3 节）。 |
+| 录屏中退后台 / 后台开始录屏？ | 都会丢事件：冻结期间 `true`/`false` 不送达，状态机可能卡在 RECORDING/CAST 或漏记整段会话；恢复后 `isCaptured()` 查询仍可信，但 PoC 未做对账（第 10.7 节）。 |
 
 ## 1. 实验环境与方法
 
@@ -491,6 +492,52 @@ App 内操作：
 
 **需要修正的结论**：后台截屏检测（真机受冻结限制）、重复 `false`（不是普遍行为）、`screenshotAppEvent` 延迟量级（真机远小于模拟器）。
 
+### 10.7 录屏 × 后台的交叉场景（补测）
+
+第 10.5 节只测了「后台截屏」，没有覆盖「录屏与后台的交叉」。补测两个场景，结果都说明：**冻结窗口内丢事件，事件驱动的状态机会失真**。
+
+**场景 A：前台开始录屏 → 退后台 → 在后台停止录屏**
+
+```
+10:09:03.125 | CAPTURE | display | true  | isCaptured=true  | verdict=RECORDING|CAST (sustained)
+10:09:06.890 | INFO    | window  | WINDOW_INACTIVE | isCaptured=true
+10:09:06.901 | INFO    | window  | WINDOW_HIDDEN   | isCaptured=true
+（10:09:19 左右在后台停止录屏 —— 进程已 Frozen，没有事件）
+10:09:23.477 | INFO    | window  | WINDOW_SHOWN    | isCaptured=false
+10:09:23.520 | INFO    | window  | WINDOW_ACTIVE   | isCaptured=false
+（之后再无 capture=false）
+```
+
+- `captureStatusChange(false)` **永远丢失**，恢复前台也不补发；
+- App 的判定卡停在 `RECORDING / CAST — sustained capture started, 等待 capture=false 结束`，而顶部 `isCaptured()` 已经是 `false`。两个信号自相矛盾，且状态机不会自己恢复。
+
+![Verdict stuck in RECORDING/CAST while isCaptured() is false](screenshots/real-stuck-verdict.png)
+
+**场景 B：App 在后台（已冻结）时开始录屏 → 回前台 → 前台停止录屏**
+
+```
+10:09:52.497 | INFO    | window  | WINDOW_HIDDEN   | isCaptured=false
+（10:09:59 左右从桌面控制中心开始录屏 —— 进程已 Frozen，没有事件）
+10:10:10.443 | INFO    | window  | WINDOW_SHOWN    | isCaptured=true
+10:10:10.479 | INFO    | window  | WINDOW_ACTIVE   | isCaptured=true
+10:10:24.733 | CAPTURE | display | false | isCaptured=false | capture=false without an active session
+```
+
+- 整段录屏只收到一个**孤立**的 `capture=false`：`capture true` 计数为 0、`rec pulses` 为 0、`LAST VERDICT` 仍是 `idle`；
+- 但录屏期间 `isCaptured()` 实际是 `true`（`WINDOW_ACTIVE` 日志与顶部 `BEING CAPTURED` 都能看到）。也就是说「查询」是对的，「事件状态机」完全没看见这次录屏。
+
+![Missed recording start: idle verdict but isCaptured=true](screenshots/real-bg-start.png)
+
+**结论与修复建议**
+
+- 在后台冻结期间，`captureStatusChange` 的 `true`/`false` 都可能丢；事件流不能当作可靠账本。
+- `isCaptured()` 是**恢复前台后仍然可信**的信号（它是查询，不是事件）。因此应在 `WINDOW_SHOWN` / `WINDOW_ACTIVE` 时做一次对账：
+  - 有活动会话但 `isCaptured()===false` → 会话在后台结束，按「结束时间未知」收尾（不要继续显示 RECORDING）；
+  - 无活动会话但 `isCaptured()===true` → 会话在后台开始，补记一条「recording (start missed)」，时长未知；
+  - 对账后两个信号一致，UI 不再出现「NOT CAPTURED 却 RECORDING/CAST」或「BEING CAPTURED 却 idle」。
+- 当前 PoC 没有做这个对账，所以上述两种状态会一直保持到下一次事件或手动清空。
+- 产品含义：普通应用无法在后台可靠还原录屏的起止时间；如果业务要求后台也准确，需要系统级能力或接受「仅前台/恢复后状态可知，起止时间不可知」的精度。
+
 ## 11. 局限与后续
 
 - 已在模拟器（API 24）和真机 `HUAWEI Pocket 2`（API 26）上验证；华为设备的手势截屏（电源 + 音量下）本次未注入测试，仍建议手动补一次。
@@ -498,5 +545,6 @@ App 内操作：
 - `isCaptured()` 在真机持续捕获起始回调内为 `true` 已确认；其他设备/版本仍可能延迟，不能完全排除。
 - `screenshotAppEvent` 真机只测了控制中心路径（+289/+443ms），滚动截屏与中止类型未测；`uitest screenCap` / `snapshot_display` 不触发。
 - **后台检测受系统冻结限制**：真机退后台约 1s 后进程进入 `freezer:/Frozen`，此后的截屏事件不会送达（恢复前台也不补发）。后台截屏检测只在前台/刚退后台的短窗口内可靠。
+- **录屏 × 后台的交叉场景已补测**：冻结期间开始或停止录屏都会丢事件；`isCaptured()` 在恢复后仍可信，但 PoC 尚未实现 `WINDOW_ACTIVE` 时的对账，因此会出现「卡在 RECORDING」或「漏记整段会话」两种失真（第 10.7 节）。
 - 事件时间戳基于 JS 主线程回调，跨进程（系统截图 UI）的绝对时间不可直接对齐；本报告的 Δ 只用于同进程事件排序。
 - 隐私模式因需要系统级权限未集成；如产品需要强遮挡，应走权限申请或系统 API。
