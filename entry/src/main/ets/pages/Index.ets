@@ -208,6 +208,9 @@ struct Index {
     if (kind === EventKind.SAMPLE) {
       return '#9E9E9E';
     }
+    if (kind === EventKind.RECONCILE) {
+      return '#E84026';
+    }
     if (kind === EventKind.INFO) {
       return '#8C8C8C';
     }

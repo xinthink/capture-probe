@@ -23,6 +23,7 @@ export enum EventKind {
   SHOT_APP = 'SHOT_APP',
   CAPTURE = 'CAPTURE',
   SAMPLE = 'SAMPLE',
+  RECONCILE = 'RECONCILE',
   INFO = 'INFO'
 }
 
@@ -95,6 +96,8 @@ export class ProbeStore {
   private pendingCaptureTime: number = 0;
   private pendingWasScreenshot: boolean = false;
   private sessionActive: boolean = false;
+  /** True when the session was reconstructed from isCaptured(), so its start time is unknown. */
+  private sessionApproximate: boolean = false;
 
   static get(): ProbeStore {
     if (ProbeStore.instance === null) {
@@ -178,6 +181,7 @@ export class ProbeStore {
       if (event.isCaptured === 'true') {
         if (!this.sessionActive) {
           this.sessionActive = true;
+          this.sessionApproximate = false;
           this.stats.captureActive = true;
           this.stats.activeSince = event.time;
           this.stats.lastVerdict = 'RECORDING / CAST';
@@ -227,9 +231,12 @@ export class ProbeStore {
         this.stats.lastPulseKind = 'RECORDING / CAST';
         this.stats.recordingPulses++;
         this.stats.lastVerdict = 'RECORDING / CAST';
-        this.stats.lastVerdictDetail = 'session ended after ' + pulse.toString() + 'ms';
-        event.note = event.note + ' | session end, pulse=' + pulse.toString() + 'ms (recording|cast)';
+        this.stats.lastVerdictDetail = 'session ended after ' + pulse.toString() + 'ms' +
+          (this.sessionApproximate ? ' (start missed while backgrounded; timing from resume)' : '');
+        event.note = event.note + ' | session end, pulse=' + pulse.toString() + 'ms (recording|cast)' +
+          (this.sessionApproximate ? ', start missed' : '');
         this.sessionActive = false;
+        this.sessionApproximate = false;
         this.stats.captureActive = false;
         this.stats.activeSince = 0;
       } else if (this.pendingWasScreenshot) {
@@ -244,6 +251,47 @@ export class ProbeStore {
       this.pendingWasScreenshot = false;
       return;
     }
+  }
+
+  /**
+   * While the process is frozen in background, capture=true/false can be lost
+   * (report sections 10.7-10.8). isCaptured() is a query and stays truthful after
+   * resume, so compare it with the event-driven session on every foreground
+   * transition and repair the difference.
+   */
+  reconcile(trigger: string): void {
+    const actual = readCaptured();
+    if (actual === this.sessionActive) {
+      return;
+    }
+    const now = Date.now();
+    if (this.sessionActive) {
+      // The session ended while the process was frozen: capture=false was lost.
+      const elapsed = this.stats.activeSince === 0 ? 0 : now - this.stats.activeSince;
+      this.sessionActive = false;
+      this.sessionApproximate = false;
+      this.stats.captureActive = false;
+      this.stats.activeSince = 0;
+      this.stats.recordingPulses++;
+      this.stats.lastPulseMs = elapsed;
+      this.stats.lastPulseKind = 'RECORDING / CAST';
+      this.stats.lastVerdict = 'RECORDING / CAST';
+      this.stats.lastVerdictDetail = 'ended while backgrounded: capture=false was lost; duration unknown (<= ' +
+        elapsed.toString() + 'ms)';
+      this.push(EventKind.RECONCILE, 'reconcile', 'session lost end',
+        'isCaptured=false on ' + trigger + ', but capture=false never arrived -> session closed (upper bound ' +
+        elapsed.toString() + 'ms)');
+      return;
+    }
+    // The session started while the process was frozen: capture=true was lost.
+    this.sessionActive = true;
+    this.sessionApproximate = true;
+    this.stats.captureActive = true;
+    this.stats.activeSince = now;
+    this.stats.lastVerdict = 'RECORDING / CAST';
+    this.stats.lastVerdictDetail = 'started while backgrounded: capture=true was lost; timing starts at ' + trigger;
+    this.push(EventKind.RECONCILE, 'reconcile', 'session lost start',
+      'isCaptured=true on ' + trigger + ', but capture=true never arrived -> session opened at resume');
   }
 
   subscribe(listener: () => void): void {
@@ -269,6 +317,7 @@ export class ProbeStore {
     this.pendingCaptureId = -1;
     this.pendingWasScreenshot = false;
     this.sessionActive = false;
+    this.sessionApproximate = false;
     this.version++;
     this.notify();
   }

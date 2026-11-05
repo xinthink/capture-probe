@@ -81,13 +81,23 @@ hdc shell "hilog -T CaptureProbe -x"
 - 如果 `SHOT` 比 `CAPTURE(true)` 晚到（本次实测的常见情况），会回溯把刚收到的那条 capture 事件重新标记为截图，并写一条说明。
 - 2s 内没有配对的 `SHOT` 且 `isCaptured=false`，标记为 `SCREENSHOT (likely)` —— 这是后台截屏的典型形态。
 
-`SHOT` 事件只在窗口聚焦时才会出现，所以后台截屏会落入「无 screenshot 事件的 capture=true」这个分支，UI 会显式提示这一点。
+`SHOT` 事件只在窗口聚焦时才会出现，所以后台截屏会落入「无 screenshot 事件的 capture=true」这个分支；真机上退后台约 1s 后连 `capture=true` 也会因进程冻结而丢失（见「已知限制」）。
+
+### 恢复对账（`ProbeStore.reconcile`）
+
+后台冻结会丢事件，因此 `CaptureMonitor` 在启动 `attach` 和每次 `WINDOW_ACTIVE` 时把事件状态机与 `display.isCaptured()` 比对：
+
+- 有会话、查询为 `false` → 会话在后台结束，按「时长未知（上界 X ms）」收尾；
+- 无会话、查询为 `true` → 会话在后台开始，补开一个标记为 `start missed` 的会话；
+- 两者一致时不产生任何事件；不一致时写一条 `RECONCILE` 事件（时间线红色徽标）。
+
+这样 badge（实时查询）与 LAST VERDICT（事件状态机）在恢复前台后保持一致；代价是后台场景的时长不精确。
 
 ## 已知限制
 
 - 模拟器无法启动系统「屏幕录制」（控制中心开关无响应，直接拉起 `com.huawei.hmos.screenrecorder` 的 ability 报权限错误）。为了拿到持续捕获的事件流，PoC 增加了「Web 屏幕共享」诊断页：H5 调 `getDisplayMedia()`，由应用授权，走的是系统同一套屏幕捕获服务（系统弹窗文案就是 "record or cast everything on your screen"）。真机上已用系统「录屏」磁贴直接验证到 `true/isCaptured=true → false`（脉冲 17.6s，见报告第 10.3 节）。
 - **后台检测受系统冻结限制**：真机退后台约 1s 后进程进入 `freezer:/Frozen`，之后既没有 `window.on('screenshot')`，也没有 `captureStatusChange`，恢复前台也不补发。普通应用无法在后台持续监听截屏。
-- **录屏 × 后台同样不可靠**：前台开始录屏后退出后台、再在后台停止，`capture=false` 会丢，判定卡永久停在 RECORDING/CAST；若在后台开始录屏，整段会话都收不到 `true`，只剩一个孤立的 `false`。`isCaptured()` 在恢复后仍可读，但当前 PoC 没做恢复对账（报告第 10.7 节）。
+- **录屏 × 后台同样不可靠，但已通过对账纠正**：前台开始录屏后退出后台、再在后台停止，`capture=false` 会丢；若在后台开始录屏，整段会话都收不到 `true`。PoC 在 `WINDOW_ACTIVE`（以及启动 attach）时用 `isCaptured()` 对账并记录 `RECONCILE` 事件，badge 与 verdict 不再矛盾（报告第 10.8 节）。代价：后台结束的时长只能给上界，后台开始的时长从恢复时刻起算。
 - `setWindowPrivacyMode` 需要 `ohos.permission.PRIVACY_WINDOW`（系统/ACL 权限），普通应用不可用，因此没有做进 PoC。
 - 事件顺序与时延随设备、系统版本、触发路径（手势/控制中心/`uitest screenCap`）变化，报告中的数值只代表实测的两台设备。
 - 工程当前已在本机 `build-profile.json5` 写入调试签名（由 `devecocli signature generate` 生成），因此可以直接 `devecocli run --device <serial>`。该配置含绝对路径与账号信息，**不随仓库提交**；新克隆的仓库需要重新生成。

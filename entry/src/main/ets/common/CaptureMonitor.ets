@@ -41,6 +41,8 @@ export class CaptureMonitor {
     CaptureMonitor.setDisplayListener(true);
     CaptureMonitor.setShotListener(true);
     CaptureMonitor.setShotAppListener(true);
+    // Cover the case where the app is launched while a capture is already running.
+    ProbeStore.get().reconcile('attach');
     try {
       win.on('windowEvent', (event: window.WindowEventType) => {
         let name = 'WINDOW_EVENT_' + event.toString();
@@ -54,6 +56,10 @@ export class CaptureMonitor {
           name = 'WINDOW_HIDDEN';
         }
         ProbeStore.get().push(EventKind.INFO, 'window', name, 'focus visibility change');
+        if (event === window.WindowEventType.WINDOW_ACTIVE) {
+          // The process may have been frozen in background, losing capture events.
+          ProbeStore.get().reconcile('WINDOW_ACTIVE');
+        }
       });
     } catch (err) {
       ProbeStore.get().push(EventKind.INFO, 'window', 'error', 'windowEvent listener failed: ' + JSON.stringify(err));
