@@ -1,7 +1,9 @@
 # CaptureProbe 实验报告：截屏 / 录屏监听与 `window.on('screenshot')` 回调时机
 
 - 日期：2026-11-04 ～ 2026-11-05
-- 设备：HarmonyOS 模拟器 `Pura 90`，HarmonyOS 6.1.1（API 24）
+- 设备：
+  - 模拟器：HarmonyOS `Pura 90`，HarmonyOS 6.1.1（API 24）——第 1～7、9 节的数据
+  - 真机：HUAWEI Pocket 2（LEM-AL00），OpenHarmony 7.0.0.105 / API 26 ——第 10 节的复核数据
 - 工程：`capture-probe`，bundle `com.example.captureprobe`
 - 观测手段：应用内单条事件时间线（`Date.now()` 毫秒级，回调入口打点）+ `hilog -T CaptureProbe`
 - 复现入口：`docs/screenshots/`、本文第 8 节
@@ -10,14 +12,14 @@
 
 | 问题 | 结论 |
 | --- | --- |
-| `display.on('captureStatusChange')` 能捕捉截屏吗？ | 能。每次截屏都收到 `captureStatusChange(true)`，应用在后台时同样收到。 |
+| `display.on('captureStatusChange')` 能捕捉截屏吗？ | 能。每次截屏都收到 `captureStatusChange(true)`；但**真机退后台约 1s 后进程被冻结，事件会丢**（第 10.5 节）。 |
 | 能只靠它区分截屏和录屏吗？ | 不能。只有一个 boolean，且截屏只观察到 `true`，没有配对的 `false`；`isCaptured()` 全程为 `false`。 |
-| 和录屏怎么区分？ | 回调内 `isCaptured()`：截屏为 `false`（瞬时捕获），录屏/投屏为 `true`（持续捕获）。窗口聚焦时再用 `window.on('screenshot')` 做 ±2s 关联确认。 |
-| `window.on('screenshot')` 和 `captureStatusChange` 谁先？ | 本机实测 **`captureStatusChange(true)` 先，`screenshot` 晚 1–58ms**。与官方 FAQ 的顺序假设相反。 |
-| `window.on('screenshot')` 相对真实画面帧的时机？ | 回调发生在画面已被捕获之后。触发截屏的那张图里没有 App 的闪屏反应；1.5s 后再截一张才带上闪屏。不能用于遮挡当前截图。 |
-| `screenshotAppEvent` 好用吗？ | 只覆盖系统截屏流程，延迟约 1.9s，`uitest screenCap` 不触发；适合「截屏已保存」类统计，不适合实时检测。 |
-| 录屏的事件流是什么？ | `captureStatusChange(true)`（`isCaptured=true`）→ 期间无事件 → `captureStatusChange(false)`（`isCaptured=false`），脉冲=录制时长；录屏中截屏会多一次 `true` + `screenshot`，停止时可能重复 `false`。见第 6 节。 |
-| 录屏/投屏验证了吗？ | 系统录屏 App 在模拟器上起不来；用 WebRTC 屏幕共享（同一套系统捕获服务与授权框）实测了持续捕获的事件流。系统录屏仍需真机复核。 |
+| 和录屏怎么区分？ | 回调内 `isCaptured()`：截屏为 `false`（瞬时捕获），录屏/投屏为 `true`（持续捕获）。窗口聚焦时再用 `window.on('screenshot')` 做 ±2s 关联确认。真机已复核。 |
+| `window.on('screenshot')` 和 `captureStatusChange` 谁先？ | 模拟器 `captureStatusChange(true)` 先、`screenshot` 晚 1–58ms；真机 1–3ms，方向一致。与官方 FAQ 的顺序假设相反。 |
+| `window.on('screenshot')` 相对真实画面帧的时机？ | 回调发生在画面已被捕获之后。触发截屏的那张图里没有 App 的闪屏反应；0.6–1.5s 后再截一张才带上闪屏。**真机复现**（第 10.4 节）。不能用于遮挡当前截图。 |
+| `screenshotAppEvent` 好用吗？ | 只覆盖系统截屏流程：模拟器延迟约 1.9s，真机 289–443ms；`uitest screenCap` / `snapshot_display` 不触发。适合「截屏已保存」类统计，不适合实时检测。 |
+| 录屏的事件流是什么？ | `captureStatusChange(true)`（`isCaptured=true`）→ 期间无事件 → `captureStatusChange(false)`（`isCaptured=false`），脉冲=录制时长；录屏中截屏会多一次 `true` + `screenshot`，停止时可能重复 `false`。见第 6 节与第 10.3 节。 |
+| 录屏/投屏验证了吗？ | 已验证。模拟器用 WebRTC 屏幕共享拿到事件流；**真机用系统「录屏」磁贴复现**：启动 `true`+`isCaptured=true`、停止 `false`、脉冲 17.6s（第 10.3 节）。 |
 
 ## 1. 实验环境与方法
 
@@ -131,6 +133,8 @@ PoC 第一次运行时完整复现了这个误判：
 （随后没有 SHOT，也没有 false）
 ```
 
+> 这是模拟器的行为。真机上退后台约 1s 后进程会被系统冻结（`freezer:/Frozen`），之后的截屏事件**根本不会送达**，恢复前台也不补发 —— 见第 10.5 节。也就是说后台截屏检测只在「刚退后台的 ~1s」窗口内有效。
+
 如果某个设备/版本上 `isCaptured()` 在持续捕获的起始回调里还没变成 `true`，这里仍会退化成二义。
 
 **息屏/锁屏**（T4）：注入电源键后窗口隐藏，3s 后仍收到一条 `capture=true`（`isCaptured=false`，推测是黑屏画面被捕获），同样没有 `screenshot` 回调。按新判据它会被标成 `SCREENSHOT (likely)`，而旧日志里还是 `RECORDING|CAST`。
@@ -143,7 +147,7 @@ PoC 第一次运行时完整复现了这个误判：
 
 ### 4.1 相对 `captureStatusChange`
 
-本机 10 次截屏的延迟分布：1、1、2、2、2、3、3、39、53、58 ms。中位数约 3ms。系统截图 UI（T3）路径为 3ms 和 53ms，`uitest screenCap` 为 1–58ms，没有出现「screenshot 先到」的样本。
+本机 10 次截屏的延迟分布：1、1、2、2、2、3、3、39、53、58 ms。中位数约 3ms。系统截图 UI（T3）路径为 3ms 和 53ms，`uitest screenCap` 为 1–58ms，没有出现「screenshot 先到」的样本。真机 12 次为 1–3ms（第 10.1 节），方向一致。
 
 这说明 `window.on('screenshot')` 是系统捕获完成后才派发的通知，而不是捕获前的钩子。
 
@@ -176,7 +180,7 @@ PoC 第一次运行时完整复现了这个误判：
 ### 4.3 `screenshotAppEvent`（API 20+）
 
 - 只在系统截屏流程（控制中心磁贴）触发，类型为 `SYSTEM_SCREENSHOT`；
-- 延迟约 **1.87–1.99s**（`22:38:55.937 → 22:38:57.934`、`22:39:34.224 → 22:39:36.144`），大概率是在截图预览/落盘结束后派发；
+- 延迟约 **1.87–1.99s**（`22:38:55.937 → 22:38:57.934`、`22:39:34.224 → 22:39:36.144`），大概率是在截图预览/落盘结束后派发；真机同路径只需 **289–443ms**（第 10.2 节）；
 - `uitest screenCap` 和 `snapshot_display` **不触发**（10 次 T1/T2 全部为 0 次 appEvent）；
 - 滚动截屏的 `SCROLL_SHOT_START/END`、截屏中止的 `SYSTEM_SCREENSHOT_ABORT` 未覆盖测试。
 
@@ -212,7 +216,7 @@ PoC 第一次运行时完整复现了这个误判：
 | 持续捕获进行中 | **`true`** |
 | 持续捕获结束回调内 | `false` |
 
-结论：`isCaptured()` 是**持续捕获会话**的状态，不是「正在被截屏」的检测器。截屏是瞬时捕获，状态来不及被观察到；录屏/投屏期间它稳定为 `true`（第 6 节实测）。因此它既不能用来检测截屏，但恰好可以用来区分「瞬态截屏」和「持续录屏」。
+结论：`isCaptured()` 是**持续捕获会话**的状态，不是「正在被截屏」的检测器。截屏是瞬时捕获，状态来不及被观察到；录屏/投屏期间它稳定为 `true`（第 6 节实测，真机系统录屏已于第 10.3 节确认）。因此它既不能用来检测截屏，但恰好可以用来区分「瞬态截屏」和「持续录屏」。
 
 ## 6. 录屏 / 投屏 / 持续捕获：实测事件流
 
@@ -284,6 +288,8 @@ Session B 在持续捕获期间又截了一次屏（08:30:02 开始共享，08:3
 | 后台/失焦时 | 只有 `true`，无 `SHOT`，`isCaptured=false` | 只有 `true`/`false`，`isCaptured=true` |
 
 ### 6.6 真机复核步骤（系统录屏 App）
+
+> 2026-11-05 已按此清单在 HUAWEI Pocket 2 上执行，结果见第 10 节（系统录屏可用，事件流与模拟器一致）。
 
 1. 安装 CaptureProbe，保持前台；
 2. 下拉控制中心 → `Screen recorder` → 开始录制，回到 App：预期 `capture true` +1、判定 `RECORDING / CAST`、`isCaptured` 为 `true`、`window shot` 不增加；
@@ -378,11 +384,119 @@ App 内操作：
 08:30:11.753 | CAPTURE | display | false | isCaptured=false | capture=false without an active session
 ```
 
-## 10. 局限与后续
+## 10. 真机复核：HUAWEI Pocket 2（OpenHarmony 7.0.0.105 / API 26）
 
-- 只在模拟器 API 24 上验证，真机（尤其华为设备的手势截屏/控制中心）顺序与时延可能不同；PoC 已按「不依赖顺序、优先 isCaptured」实现，可直接用于真机复测。
-- 录屏事件流来自 WebRTC 屏幕共享（同一套系统捕获服务与授权框），不是系统录屏 App；系统录屏、投屏、滚动截屏、截屏中止仍需真机补测。
-- `isCaptured()` 在持续捕获起始回调里为 `true` 是本机的关键假设；不同设备/版本可能延迟，需要在真机上复核。
-- `screenshotAppEvent` 在部分触发方式下不触发，需在真机上补全触发矩阵。
+2026-11-05 在真机 `HUAWEI Pocket 2（LEM-AL00）` 上用同一份 PoC 复跑了第 6.6 节的清单。系统 `OpenHarmony-7.0.0.105`（API 26，安全补丁 2026/09/01），App 仍以 SDK 6.1.1(24) 构建、`devecocli run` 安装，API 24 的应用在 API 26 上直接运行。观测手段不变（应用内时间线 + `hilog -T CaptureProbe`），触发方式用 `hdc` 注入。
+
+### 10.1 截屏：顺序、时延与 `isCaptured()`
+
+12 次前台截屏（T1/T2/T3）全部是 `captureStatusChange(true)` 先到，`window.on('screenshot')` 晚 **1–3ms**；回调内 `isCaptured()` 一律 `false`；没有一次 `captureStatusChange(false)`。
+
+| # | 触发 | `capture=true` | `window.screenshot` | Δ | `screenshotAppEvent` |
+| --- | --- | --- | --- | --- | --- |
+| 1 | T2 | 09:21:21.105 | 09:21:21.108 | +3ms | — |
+| 2 | T1 | 09:22:30.099 | 09:22:30.101 | +2ms | — |
+| 3 | T1 | 09:22:33.222 | 09:22:33.224 | +2ms | — |
+| 4 | T1 | 09:22:36.305 | 09:22:36.308 | +3ms | — |
+| 5 | T1 | 09:22:39.418 | 09:22:39.421 | +3ms | — |
+| 6 | T1 | 09:22:42.523 | 09:22:42.526 | +3ms | — |
+| 7 | T2 | 09:22:48.715 | 09:22:48.718 | +3ms | — |
+| 8 | T2 | 09:22:51.750 | 09:22:51.753 | +3ms | — |
+| 9 | T3 | 09:23:11.349 | 09:23:11.350 | +1ms | 09:23:11.793（+443ms） |
+| 10 | T1 | 09:26:01.654 | 09:26:01.656 | +2ms | — |
+| 11 | T1 | 09:26:02.200 | 09:26:02.202 | +2ms | — |
+| 12 | T3 | 09:26:37.008 | 09:26:37.009 | +1ms | 09:26:37.298（+289ms） |
+
+与模拟器（1–58ms、中位 3ms）相比，真机时延更集中，但**方向完全一致**：capture 先、screenshot 后。官方 FAQ 依赖的「screenshot 先到」前提在真机上同样不成立，按 flag 写法仍会把截屏误判成录屏。
+
+原始日志（节选）：
+
+```
+09:23:11.349 | CAPTURE | display | true | isCaptured=false | delta=290ms | verdict=SCREENSHOT? (transient, no window screenshot event)
+09:23:11.350 | SHOT    | window  | screenshot | isCaptured=false | delta=1ms | reclassifies capture #24 as SCREENSHOT (shot is +1ms late)
+09:23:11.793 | SHOT_APP| window  | SYSTEM_SCREENSHOT | isCaptured=false | delta=443ms | window.on('screenshotAppEvent') fired (API 20+)
+```
+
+### 10.2 `screenshotAppEvent` 在真机上快一个数量级
+
+- 控制中心磁贴路径：**+443ms、+289ms**（模拟器为 +1867ms、+1994ms）；
+- `uitest screenCap` / `snapshot_display` 的 10 次截屏（T1/T2）仍然一次都不触发；
+- 页面级 listener 开启后，两个 `screenshot` 监听器都在同一毫秒回调（`window` 与 `window(page)` 相差 0–1ms）。
+
+结论不变：它是「截屏已保存」的事后事件，只是真机落盘更快；仍不能用于实时检测。
+
+### 10.3 系统录屏：真机拿到了完整事件流
+
+用控制中心「录屏」磁贴（不是 WebRTC 共享）实测，App 保持前台：
+
+```
+09:25:35.242 | INFO    | window  | WINDOW_ACTIVE   | isCaptured=false | （磁贴关闭，App 回前台）
+09:25:35.330 | CAPTURE | display | true            | isCaptured=true  | verdict=RECORDING|CAST (sustained)
+09:25:41.180 | CAPTURE | display | true            | isCaptured=true  | capture start while already captured (session continues)
+09:25:41.182 | SHOT    | window  | screenshot      | isCaptured=true  | reclassifies capture #67 as SCREENSHOT (shot is +2ms late), session continues
+09:25:52.925 | CAPTURE | display | false           | isCaptured=false | session end, pulse=17595ms (recording|cast)
+```
+
+三个关键点全部与模拟器一致，并在真机上得到确认：
+
+1. **启动**：`captureStatusChange(true)` 回调内 `isCaptured()===true`，据此判定 `RECORDING / CAST`；
+2. **录屏中截屏**：再收到一次 `true`（`isCaptured=true`，不重置会话），2ms 后 `SHOT` 把这条 capture 回溯标成 `SCREENSHOT`，会话继续；
+3. **停止**：`captureStatusChange(false)`、`isCaptured=false`，`true→false` 间隔 **17595ms** 就是录制时长。
+
+差异：这次系统录屏**只发了一次 `false`**，没有模拟器 WebRTC 会话里那种间隔 5ms 的重复 `false`。重复 `false` 是路径/实现相关的，不能当作必然行为，但「忽略会话结束后的重复 `false`」仍然是必要的防御。
+
+![Real device session timeline](screenshots/real-probe-ui.png)
+
+### 10.4 闪屏时序：真机上回调同样晚于画面帧
+
+「截图闪屏」开启时：
+
+1. 表格 #10 的截屏在 `09:26:01.654` 捕获，`SHOT` 在 `09:26:01.656` 到达（+2ms）；
+2. 这张由系统保存的截图里**没有**红色闪屏 —— 就是 10.3 节那张时间线截图（App 时钟停在 `09:26:01.484`，即回调前最后渲染的一帧）；
+3. 0.55s 后的表格 #11 截屏（`09:26:02.200`）画面里是完整的红色 `SCREENSHOT DETECTED #12 / 09:26:01.656` 闪屏。
+
+![Screenshot 0.55s later, flash visible](screenshots/real-flash-overlay.png)
+
+这与模拟器结论一致：**触发截屏的那一帧在回调之前就已合成完毕**，`window.on('screenshot')` 之后改 UI 来不及遮挡当前这张图。真机（API 26）同样如此。
+
+### 10.5 后台截屏：只有退后台约 1s 内能收到
+
+真机上把 App 按 Home 键退到后台，再延时截屏，结果与模拟器**不同**：
+
+| Home 后延时 | 是否收到 `captureStatusChange(true)` |
+| --- | --- |
+| 0.34s（立即） | 收到（`isCaptured=false`，无 `SHOT`） |
+| 0.5s | 收到 |
+| 1s | 收到 |
+| 2s | **没有** |
+| 4s | **没有** |
+| 8s | **没有** |
+
+进程状态给出了解释：前台时 cgroup 为 `freezer:/Thawed`，退后台 3s 后变成 `freezer:/Frozen` —— 系统把后台进程冻结了，`display` 回调根本没有机会执行（恢复前台后也不会补发）。模拟器没有这一冻结机制，所以「后台截屏也能收到」的结论只在模拟器成立。
+
+实际含义：普通应用在后台**不能可靠依赖 `captureStatusChange` 检测截屏**。能稳定工作的窗口只有「前台 / 刚退后台的约 1s」；超过这个窗口，事件会静默丢失，而不是延迟送达。
+
+### 10.6 与模拟器结论的差异汇总
+
+| 维度 | 模拟器 API 24 | 真机 API 26 |
+| --- | --- | --- |
+| `shot` 相对 `capture` 的 Δ | 1–58ms | 1–3ms |
+| `screenshotAppEvent` 延迟 | 1867–1994ms | 289–443ms |
+| 后台截屏（>2s） | 能收到 `true` | 进程被冻结，事件丢失 |
+| 录屏停止的 `false` | 可能重复两次（WebRTC） | 系统录屏只发一次 |
+| 持续捕获的事件形状 | `true(isCaptured=true) → false` | 相同 |
+| 「回调晚于画面帧」 | 成立 | 成立 |
+
+**在真机上仍然成立的结论**：`isCaptured()` 作为「瞬时截屏 vs 持续录屏」的判据、`capture` 先于 `shot` 的顺序、`SHOT` 事后回溯关联、闪屏遮不住当前截图。
+
+**需要修正的结论**：后台截屏检测（真机受冻结限制）、重复 `false`（不是普遍行为）、`screenshotAppEvent` 延迟量级（真机远小于模拟器）。
+
+## 11. 局限与后续
+
+- 已在模拟器（API 24）和真机 `HUAWEI Pocket 2`（API 26）上验证；华为设备的手势截屏（电源 + 音量下）本次未注入测试，仍建议手动补一次。
+- 系统录屏已在真机验证；投屏、滚动截屏、截屏中止仍未覆盖。真机停止录屏只发一次 `false`，模拟器 WebRTC 共享会发两次，说明该行为与实现路径相关。
+- `isCaptured()` 在真机持续捕获起始回调内为 `true` 已确认；其他设备/版本仍可能延迟，不能完全排除。
+- `screenshotAppEvent` 真机只测了控制中心路径（+289/+443ms），滚动截屏与中止类型未测；`uitest screenCap` / `snapshot_display` 不触发。
+- **后台检测受系统冻结限制**：真机退后台约 1s 后进程进入 `freezer:/Frozen`，此后的截屏事件不会送达（恢复前台也不补发）。后台截屏检测只在前台/刚退后台的短窗口内可靠。
 - 事件时间戳基于 JS 主线程回调，跨进程（系统截图 UI）的绝对时间不可直接对齐；本报告的 Δ 只用于同进程事件排序。
 - 隐私模式因需要系统级权限未集成；如产品需要强遮挡，应走权限申请或系统 API。

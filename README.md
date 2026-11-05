@@ -7,17 +7,17 @@
 
 同时顺带对比 `window.on('screenshotAppEvent')`（API 20+）与 `display.isCaptured()` 的实际表现。
 
-> 实测环境：HarmonyOS 6.1.1 / API 24 模拟器（Pura 90）。真机行为可能不同，尤其是事件顺序和录屏的 `false` 回调，详见 [docs/report.md](docs/report.md)。
+> 实测环境：HarmonyOS 6.1.1 / API 24 模拟器（Pura 90）+ **HUAWEI Pocket 2 真机（OpenHarmony 7.0.0.105 / API 26）**。两套环境均已跑通，真机复核数据见 [docs/report.md](docs/report.md) 第 10 节。
 
 ## 结论速览
 
-- **能捕捉截屏**：每次截屏都会触发 `captureStatusChange(true)`，包括应用在后台时。
-- **录屏/投屏是持续捕获**：开始 `captureStatusChange(true)` 时 `isCaptured()=true`，期间没有 capture 事件、也没有 `window.on('screenshot')`，停止时 `captureStatusChange(false)`、`isCaptured()=false`，脉冲时长等于录制时长。录屏中再截屏会额外收到一次 `true`（`isCaptured` 仍为 true）和一次 `screenshot`，会话继续；停止时可能收到**两个** `false`。
-- **单看 boolean 分不清，但回调里的 `isCaptured()` 可以**：截屏时 `isCaptured=false`（瞬时捕获），持续捕获时 `isCaptured=true`。PoC 已改为以此为主判据。
-- **`window.on('screenshot')` 晚于 `captureStatusChange(true)`**：实测晚 1–58ms。这与官方 FAQ「截屏事件总是发生在录屏事件之前」的顺序假设相反，按 FAQ 的 flag 写法会把截屏误判成录屏。
-- **回调晚于画面捕获**：触发截屏的那张图里没有 App 的闪屏反应，1.5s 后再截一张才会带上闪屏。也就是说 `window.on('screenshot')` 是事后通知，不能用来遮挡当前这张截图。
-- **只有前台窗口能收到 `window.on('screenshot')`**：App 退到后台后截屏只剩 `captureStatusChange(true)`；但此时 `isCaptured=false`，仍可与录屏（`isCaptured=true`）区分，PoC 会把它标成 `SCREENSHOT (likely)`。
-- **`screenshotAppEvent` 只覆盖系统截屏流程**：控制中心截屏约 1.9s 后才收到 `SYSTEM_SCREENSHOT`；`uitest screenCap` 不触发。不可用于实时检测。
+- **能捕捉截屏**：每次截屏都会触发 `captureStatusChange(true)`。注意真机退后台约 1s 后进程会被系统冻结，之后的截屏事件会丢失（见下方「后台」一条）。
+- **录屏/投屏是持续捕获**：开始 `captureStatusChange(true)` 时 `isCaptured()=true`，期间没有 capture 事件、也没有 `window.on('screenshot')`，停止时 `captureStatusChange(false)`、`isCaptured()=false`，脉冲时长等于录制时长。录屏中再截屏会额外收到一次 `true`（`isCaptured` 仍为 true）和一次 `screenshot`，会话继续；停止时**可能**收到两个 `false`（真机系统录屏只发一个，模拟器 WebRTC 共享发两个）。
+- **单看 boolean 分不清，但回调里的 `isCaptured()` 可以**：截屏时 `isCaptured=false`（瞬时捕获），持续捕获时 `isCaptured=true`。PoC 已改为以此为主判据，模拟器和真机均验证通过。
+- **`window.on('screenshot')` 晚于 `captureStatusChange(true)`**：模拟器晚 1–58ms，真机晚 1–3ms。这与官方 FAQ「截屏事件总是发生在录屏事件之前」的顺序假设相反，按 FAQ 的 flag 写法会把截屏误判成录屏。
+- **回调晚于画面捕获**：触发截屏的那张图里没有 App 的闪屏反应，0.6–1.5s 后再截一张才会带上闪屏。也就是说 `window.on('screenshot')` 是事后通知，不能用来遮挡当前这张截图（真机同样复现）。
+- **后台窗口收不到 `window.on('screenshot')`，且真机会冻结进程**：退到后台后截屏没有 `screenshot` 回调，只有 `captureStatusChange(true)`；并且真机退后台约 1s 后进程进入 `freezer:/Frozen`，连 `captureStatusChange` 也不会送达（恢复前台不补发）。因此后台截屏检测只在「前台 / 刚退后台约 1s」内可靠。
+- **`screenshotAppEvent` 只覆盖系统截屏流程**：控制中心截屏模拟器约 1.9s、真机 289–443ms 后才收到 `SYSTEM_SCREENSHOT`；`uitest screenCap` 不触发。不可用于实时检测。
 - **`isCaptured()` 对截屏无效**：包括在 `captureStatusChange(true)` 回调内，始终为 `false`；100ms 采样也从未捕捉到翻转。
 
 ![CaptureProbe UI with recording session timeline](docs/screenshots/probe-ui.png)
@@ -46,6 +46,8 @@ devecocli run --device <serial>
 ```
 
 本工程使用 API 24 编译（`compileSdkVersion` 跟随 SDK 6.1.1）。`screenshotAppEvent` 需要 API 20+。
+
+真机安装需要签名：先 `devecocli auth login`（华为开发者账号），再 `devecocli signature generate`，它会把本机调试证书/Profile 写进 `build-profile.json5`（含绝对路径，属于本机配置，不建议提交）。模拟器可跳过这一步。
 
 ## App 怎么用
 
@@ -83,7 +85,8 @@ hdc shell "hilog -T CaptureProbe -x"
 
 ## 已知限制
 
-- 模拟器无法启动系统「屏幕录制」（控制中心开关无响应，直接拉起 `com.huawei.hmos.screenrecorder` 的 ability 报权限错误）。为了拿到持续捕获的事件流，PoC 增加了「Web 屏幕共享」诊断页：H5 调 `getDisplayMedia()`，由应用授权，走的是系统同一套屏幕捕获服务（系统弹窗文案就是 "record or cast everything on your screen"）。录屏的真实行为已用它验证到 `true/isCaptured=true → false`，但系统录屏 App 本身仍需真机补测。步骤见报告。
+- 模拟器无法启动系统「屏幕录制」（控制中心开关无响应，直接拉起 `com.huawei.hmos.screenrecorder` 的 ability 报权限错误）。为了拿到持续捕获的事件流，PoC 增加了「Web 屏幕共享」诊断页：H5 调 `getDisplayMedia()`，由应用授权，走的是系统同一套屏幕捕获服务（系统弹窗文案就是 "record or cast everything on your screen"）。真机上已用系统「录屏」磁贴直接验证到 `true/isCaptured=true → false`（脉冲 17.6s，见报告第 10.3 节）。
+- **后台检测受系统冻结限制**：真机退后台约 1s 后进程进入 `freezer:/Frozen`，之后既没有 `window.on('screenshot')`，也没有 `captureStatusChange`，恢复前台也不补发。普通应用无法在后台持续监听截屏。
 - `setWindowPrivacyMode` 需要 `ohos.permission.PRIVACY_WINDOW`（系统/ACL 权限），普通应用不可用，因此没有做进 PoC。
-- 事件顺序与时延随设备、系统版本、触发路径（手势/控制中心/`uitest screenCap`）变化，报告中的数值只代表本机。
-- 工程已安装到模拟器，但 `build-profile.json5` 没有配置签名；`devecocli run` 会自动完成安装签名。
+- 事件顺序与时延随设备、系统版本、触发路径（手势/控制中心/`uitest screenCap`）变化，报告中的数值只代表实测的两台设备。
+- 工程当前已在本机 `build-profile.json5` 写入调试签名（由 `devecocli signature generate` 生成），因此可以直接 `devecocli run --device <serial>`。该配置含绝对路径与账号信息，**不随仓库提交**；新克隆的仓库需要重新生成。
